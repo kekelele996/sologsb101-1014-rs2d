@@ -34,7 +34,9 @@ import FilterBar from '../components/common/FilterBar';
 import EmptyPanel from '../components/common/EmptyPanel';
 import RateTag from '../components/common/RateTag';
 import StatBadge from '../components/common/StatBadge';
+import { useIdbTable } from '../hooks/useIdbTable';
 import { usePlotStore } from '../stores/plotStore';
+import { db } from '../utils/db';
 import {
   PLOT_STATE_OPTIONS,
   RESTORE_MODE_OPTIONS,
@@ -43,6 +45,7 @@ import {
   type Plot,
   type PlotDraft,
 } from '../types/plot';
+import type { TideStation } from '../types/tide';
 import { ROUTES } from '../router';
 import { percentText } from '../utils/rate';
 
@@ -53,6 +56,8 @@ const DEFAULT_DRAFT: PlotDraft = {
   substrate: '淤泥质',
   restoreMode: '造林',
   state: '跟踪中',
+  tideStationId: '',
+  surveyDurationMin: 90,
 };
 
 export default function PlotList() {
@@ -69,6 +74,10 @@ export default function PlotList() {
   const updatePlot = usePlotStore((state) => state.updatePlot);
   const deletePlot = usePlotStore((state) => state.deletePlot);
   const selectPlot = usePlotStore((state) => state.selectPlot);
+  const { rows: tideStations } = useIdbTable<TideStation>(db.tideStations, { sortByUpdatedAt: false });
+
+  const stationName = (stationId: string): string =>
+    tideStations.find((station) => station.id === stationId)?.name ?? '未挂站';
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Plot | null>(null);
@@ -103,6 +112,8 @@ export default function PlotList() {
       substrate: plot.substrate,
       restoreMode: plot.restoreMode,
       state: plot.state,
+      tideStationId: plot.tideStationId,
+      surveyDurationMin: plot.surveyDurationMin,
     });
     setOpen(true);
   };
@@ -177,6 +188,13 @@ export default function PlotList() {
       dataIndex: 'substrate',
       key: 'substrate',
       width: 96,
+    },
+    {
+      title: '对账潮位站',
+      key: 'tideStationId',
+      width: 140,
+      render: (_value, record) =>
+        record.tideStationId ? <Tag color="geekblue">{stationName(record.tideStationId)}</Tag> : <Tag>未挂站</Tag>,
     },
     {
       title: '状态',
@@ -348,7 +366,7 @@ export default function PlotList() {
             loading={!ready}
             columns={columns}
             dataSource={rows}
-            scroll={{ x: 1480 }}
+            scroll={{ x: 1620 }}
             pagination={{ pageSize: 8, showSizeChanger: false }}
             locale={{
               emptyText: (
@@ -404,6 +422,26 @@ export default function PlotList() {
             </Form.Item>
             <Form.Item name="state" label="跟踪状态" style={{ flex: 1 }} rules={[{ required: true }]}>
               <Select options={PLOT_STATE_OPTIONS.map((value) => ({ value, label: value }))} />
+            </Form.Item>
+          </Space>
+          <Space size={12} style={{ display: 'flex' }}>
+            <Form.Item name="tideStationId" label="对账潮位站" style={{ flex: 2 }}>
+              <Select
+                allowClear
+                placeholder="选择该地块对账的潮位监测站"
+                options={tideStations.map((station) => ({
+                  value: station.id,
+                  label: `${station.name}（${station.code}）`,
+                }))}
+              />
+            </Form.Item>
+            <Form.Item
+              name="surveyDurationMin"
+              label="单段排期时长（分钟）"
+              style={{ flex: 1 }}
+              tooltip="外业排期时该地块预计占用的露滩时长；留空则按面积估算"
+            >
+              <InputNumber min={15} max={600} step={15} style={{ width: '100%' }} placeholder="按面积估算" />
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>

@@ -73,7 +73,11 @@ export function parseSnapshot(text: string): SnapshotParseResult {
       return { ok: false, message: `存档缺少 ${String(key)} 数组。`, snapshot: null };
     }
   }
-  return { ok: true, message: '存档校验通过。', snapshot: data as DatabaseSnapshot };
+  // v3 新增潮位两表：旧版存档没有时按空数组处理（只重试潮位侧也不影响外业）
+  const normalized = data as DatabaseSnapshot;
+  if (!Array.isArray(normalized.tideStations)) normalized.tideStations = [];
+  if (!Array.isArray(normalized.tideWindows)) normalized.tideWindows = [];
+  return { ok: true, message: '存档校验通过。', snapshot: normalized };
 }
 
 /** 导出全部地块的成活率汇总 CSV */
@@ -83,6 +87,7 @@ export function exportSummaryCsv(
   plantings: Planting[],
   surveys: Survey[],
   replants: Replant[],
+  tideStations: import('../types/tide').TideStation[] = [],
 ): string {
   const header = [
     '地块名',
@@ -103,6 +108,9 @@ export function exportSummaryCsv(
     '缺株数(株)',
     '补植计划数',
     '最近补植日期',
+    '对账潮位站',
+    '有效测次数',
+    '挂起测次数',
   ];
   const lines: string[] = [header.map(csvCell).join(',')];
   plots.forEach((plot) => {
@@ -113,6 +121,13 @@ export function exportSummaryCsv(
     const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
     const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    const station = tideStations.find((item) => item.id === plot.tideStationId);
+    const effective = plotSurveys.filter((row) =>
+      ['exposed', 'forced', 'legacyValid'].includes(row.tideStatus),
+    ).length;
+    const hung = plotSurveys.filter((row) =>
+      ['suspended', 'invalidated', 'legacyReadonly'].includes(row.tideStatus),
+    ).length;
     lines.push(
       [
         plot.name,
@@ -133,6 +148,9 @@ export function exportSummaryCsv(
         plot.missingCount,
         plotReplants.length,
         plot.lastReplantDate || '—',
+        station ? `${station.name} v${station.tideTableVersion}` : '未挂站',
+        effective,
+        hung,
       ]
         .map(csvCell)
         .join(','),
@@ -148,9 +166,10 @@ export function exportSummaryCsvFile(
   plantings: Planting[],
   surveys: Survey[],
   replants: Replant[],
+  tideStations: import('../types/tide').TideStation[] = [],
 ): string {
   const filename = `红树林成活率汇总-${stampSuffix()}.csv`;
-  download(filename, exportSummaryCsv(plots, seedlings, plantings, surveys, replants), 'text/csv;charset=utf-8');
+  download(filename, exportSummaryCsv(plots, seedlings, plantings, surveys, replants, tideStations), 'text/csv;charset=utf-8');
   return filename;
 }
 

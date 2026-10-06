@@ -15,12 +15,21 @@ import {
   round1,
   suggestReplantCount,
 } from '../utils/rate';
+import { isEffectiveStatus } from '../utils/tide';
 
 /** 单个测次的成活率数据点 */
 export interface SurvivalPoint {
   surveyId: string;
   round: number;
   date: string;
+  startAt: string;
+  endAt: string;
+  /** 潮位对账状态（露滩有效 / 涨潮硬凑 / 挂起 / 失效 / 历史） */
+  tideStatus: Survey['tideStatus'];
+  /** 定级依据的潮位表版本 */
+  tideBasisVersion: number;
+  /** 该测次是否计入成活率 / 补植统计 */
+  effective: boolean;
   aliveCount: number;
   avgHeightCm: number;
   /** 该测次的成活率（%） */
@@ -77,6 +86,11 @@ export function buildSurvivalSummary(
         surveyId: row.id,
         round: row.round,
         date: row.date,
+        startAt: row.startAt,
+        endAt: row.endAt,
+        tideStatus: row.tideStatus,
+        tideBasisVersion: row.tideBasisVersion,
+        effective: isEffectiveStatus(row.tideStatus),
         aliveCount: row.aliveCount,
         avgHeightCm: row.avgHeightCm,
         rate,
@@ -85,8 +99,10 @@ export function buildSurvivalSummary(
       };
     });
 
-  const latest = points.length > 0 ? points[points.length - 1] : null;
-  const previous = points.length > 1 ? points[points.length - 2] : null;
+  // 挂起 / 失效 / 历史只读的测次先挂起等复核，不计入成活率趋势，也不据此生成补植计划
+  const effectivePoints = points.filter((point) => point.effective);
+  const latest = effectivePoints.length > 0 ? effectivePoints[effectivePoints.length - 1] : null;
+  const previous = effectivePoints.length > 1 ? effectivePoints[effectivePoints.length - 2] : null;
   const growth = latest && previous ? heightGrowth(previous.avgHeightCm, latest.avgHeightCm) : { delta: 0, pct: 0 };
 
   return {
@@ -99,7 +115,7 @@ export function buildSurvivalSummary(
     trend: latest && previous ? round1(latest.rate - previous.rate) : 0,
     heightDelta: growth.delta,
     heightPct: growth.pct,
-    suggestReplant: latest ? suggestReplantCount(totalCount, latest.aliveCount) : totalCount,
+    suggestReplant: latest ? suggestReplantCount(totalCount, latest.aliveCount) : 0,
     level: latest ? latest.level : 'poor',
     warn: latest !== null && latest.rate < threshold,
   };

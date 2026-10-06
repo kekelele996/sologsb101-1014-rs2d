@@ -34,6 +34,10 @@ export interface Plot {
   restoreMode: RestoreMode;
   /** 跟踪状态 */
   state: PlotState;
+  /** 对账潮位监测站 id（排期 / 对账时按该站的露滩时段判定） */
+  tideStationId: string;
+  /** 外业单段排期预估作业时长（分钟）；为空时按面积兜底估算 */
+  surveyDurationMin: number;
   /** 缺株数（株）——补植完成后由此回写 */
   missingCount: number;
   /** 最近一次补植/复壮回写日期 */
@@ -52,4 +56,6 @@ export interface PlotDraft {
   substrate: Substrate;
   restoreMode: RestoreMode;
   state: PlotState;
+  tideStationId: string;
+  surveyDurationMin: number;
 }

@@ -59,6 +59,7 @@ export default function ReplantPlan() {
   const seedlings = usePlotStore((state) => state.seedlings);
   const plantings = usePlotStore((state) => state.plantings);
   const surveys = usePlotStore((state) => state.surveys);
+  const tideStations = usePlotStore((state) => state.tideStations);
   const statOf = usePlotStore((state) => state.statOf);
   const ready = usePlotStore((state) => state.ready);
 
@@ -106,13 +107,15 @@ export default function ReplantPlan() {
     const missing = rows.reduce((acc, row) => acc + row.missingCount, 0);
     const reviewed = rows.filter((row) => row.state === '已复核').length;
     const pending = rows.filter((row) => row.state === '待补植').length;
+    const hungPlots = plots.filter((plot) => statOf(plot.id).hung);
     return {
       missing,
       pending,
       reviewed,
+      hungPlots,
       reviewPct: rows.length === 0 ? 0 : Math.round((reviewed / rows.length) * 1000) / 10,
     };
-  }, [rows]);
+  }, [rows, plots, statOf]);
 
   const openCreate = (): void => {
     setEditing(null);
@@ -165,7 +168,6 @@ export default function ReplantPlan() {
       setSubmitting(false);
     }
   };
-
   const handleAdvance = async (row: Replant): Promise<void> => {
     const next = await advance(row.id);
     if (next === null) {
@@ -182,7 +184,7 @@ export default function ReplantPlan() {
   };
 
   const handleExportCsv = (): void => {
-    const filename = exportSummaryCsvFile(plots, seedlings, plantings, surveys, rows);
+    const filename = exportSummaryCsvFile(plots, seedlings, plantings, surveys, rows, tideStations);
     message.success(`已导出成活率汇总 ${filename}`);
   };
 
@@ -201,7 +203,7 @@ export default function ReplantPlan() {
   const handleReset = (): void => {
     modal.confirm({
       title: '确认重置本地数据？',
-      content: '全部地块、苗木批次、栽植记录、验收记录与补植计划都会被清空，并重新灌入演示数据。',
+      content: '全部地块、苗木批次、栽植记录、验收记录、潮位站与露滩时段、补植计划都会被清空，并重新灌入演示数据。',
       okText: '确认重置',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -391,6 +393,16 @@ export default function ReplantPlan() {
 
       {lastMessage !== '' ? (
         <Alert type="info" showIcon style={{ marginBottom: 14 }} message={lastMessage} />
+      ) : null}
+
+      {stats.hungPlots.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`有 ${stats.hungPlots.length} 个地块最新测次挂起待复核，挂起期间不生成补植计划`}
+          description={stats.hungPlots.map((plot) => plot.name).join('、')}
+        />
       ) : null}
 
       <Card

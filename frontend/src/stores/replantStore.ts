@@ -14,6 +14,7 @@ import {
   putReplant,
   removeReplant,
   resetDatabase,
+  ROW_REVISION,
   type DatabaseSnapshot,
 } from '../utils/db';
 import { nowIso, uuid } from '../utils/id';
@@ -104,6 +105,11 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
   },
 
   async createReplant(draft) {
+    // 挂起期间不生成补植计划：最新有效测次缺失（挂起 / 失效 / 只读）时拒绝手工新建
+    const stat = usePlotStore.getState().statOf(draft.plotId);
+    if (stat.hung) {
+      throw new Error('该地块最新测次仍挂起待复核，挂起期间不生成补植计划；请先到潮位对账页复核。');
+    }
     const stamp = nowIso();
     const row: Replant = {
       id: uuid('replant'),
@@ -114,7 +120,7 @@ export const useReplantStore = create<ReplantStoreState>((set, get) => ({
       state: draft.state,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putReplant(row);
     set({ revision: get().revision + 1 });

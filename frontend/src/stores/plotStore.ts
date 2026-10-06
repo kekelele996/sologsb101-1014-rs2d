@@ -9,6 +9,7 @@ import type { Plot, PlotDraft, Substrate, TideZone } from '../types/plot';
 import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey, RateLevel } from '../types/survey';
+import type { TideStation, TideWindow } from '../types/tide';
 import {
   DB_SCHEMA_VERSION,
   ROW_REVISION,
@@ -37,8 +38,12 @@ export interface PlotStat {
   seedlingQuantity: number;
   /** 栽植总株数（株） */
   plantTotal: number;
-  /** 验收测次数 */
+  /** 验收测次数（全部，含挂起/失效/只读） */
   surveyCount: number;
+  /** 对账有效、参与成活统计的测次数 */
+  effectiveSurveyCount: number;
+  /** 最新有效测次是否处于挂起（挂起期间不生成补植计划） */
+  hung: boolean;
   /** 最新成活率（%） */
   latestRate: number;
   /** 最新等级 */
@@ -74,6 +79,8 @@ interface PlotStoreState {
   seedlings: Seedling[];
   plantings: Planting[];
   surveys: Survey[];
+  tideStations: TideStation[];
+  tideWindows: TideWindow[];
   currentPlotId: string | null;
   loading: boolean;
   ready: boolean;
@@ -101,6 +108,8 @@ const EMPTY_STAT: Omit<PlotStat, 'plotId'> = {
   seedlingQuantity: 0,
   plantTotal: 0,
   surveyCount: 0,
+  effectiveSurveyCount: 0,
+  hung: false,
   latestRate: 0,
   level: 'poor',
   trend: 0,
@@ -114,6 +123,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
   seedlings: [],
   plantings: [],
   surveys: [],
+  tideStations: [],
+  tideWindows: [],
   currentPlotId: readCurrentPlotId(),
   loading: true,
   ready: false,
@@ -130,15 +141,17 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       if (!subscribed) {
         subscribed = true;
         liveQuery(async () => {
-          const [plots, seedlings, plantings, surveys] = await Promise.all([
+          const [plots, seedlings, plantings, surveys, tideStations, tideWindows] = await Promise.all([
             db.plots.toArray(),
             db.seedlings.toArray(),
             db.plantings.toArray(),
             db.surveys.toArray(),
+            db.tideStations.toArray(),
+            db.tideWindows.toArray(),
           ]);
-          return { plots, seedlings, plantings, surveys };
+          return { plots, seedlings, plantings, surveys, tideStations, tideWindows };
         }).subscribe({
-          next: ({ plots, seedlings, plantings, surveys }) => {
+          next: ({ plots, seedlings, plantings, surveys, tideStations, tideWindows }) => {
             const stats: Record<string, PlotStat> = {};
             const summaries: Record<string, SurvivalSummary> = {};
             plots.forEach((plot) => {
@@ -151,6 +164,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
                 seedlingQuantity: plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
                 plantTotal: summary.totalCount,
                 surveyCount: summary.points.length,
+                effectiveSurveyCount: summary.points.filter((point) => point.effective).length,
+                hung: summary.latest === null && summary.points.length > 0,
                 latestRate: summary.latestRate,
                 level: summary.level,
                 trend: summary.trend,
@@ -165,6 +180,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
               seedlings,
               plantings,
               surveys,
+              tideStations,
+              tideWindows,
               stats,
               summaries,
               loading: false,
@@ -203,6 +220,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       substrate: draft.substrate,
       restoreMode: draft.restoreMode,
       state: draft.state,
+      tideStationId: draft.tideStationId ?? '',
+      surveyDurationMin: draft.surveyDurationMin ?? 0,
       missingCount: 0,
       lastReplantDate: '',
       createdAt: stamp,
@@ -225,6 +244,8 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       substrate: draft.substrate,
       restoreMode: draft.restoreMode,
       state: draft.state,
+      tideStationId: draft.tideStationId ?? existing.tideStationId ?? '',
+      surveyDurationMin: draft.surveyDurationMin ?? existing.surveyDurationMin ?? 0,
     });
   },
 
