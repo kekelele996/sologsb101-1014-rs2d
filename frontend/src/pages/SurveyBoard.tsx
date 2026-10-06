@@ -18,6 +18,7 @@ import {
   Space,
   Table,
   Tag,
+  TimePicker,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -29,6 +30,7 @@ import {
   RiseOutlined,
   FallOutlined,
   ToolOutlined,
+  ClockCircleOutlined,
 } from '@ant-design/icons';
 import dayjs, { type Dayjs } from 'dayjs';
 import EmptyPanel from '../components/common/EmptyPanel';
@@ -39,6 +41,7 @@ import { usePlotStore } from '../stores/plotStore';
 import { useSurveyStore } from '../stores/surveyStore';
 import { db } from '../utils/db';
 import { RATE_LEVEL_LABEL, RATE_LEVEL_OPTIONS, type RateLevel, type Survey } from '../types/survey';
+import { TIDE_CHECK_STATUS_COLOR, TIDE_CHECK_STATUS_LABEL, type TideCheckStatus } from '../types/tide';
 import { SURVIVAL_WARN_RATE, percentText } from '../utils/rate';
 
 interface SurveyFormValues {
@@ -47,6 +50,8 @@ interface SurveyFormValues {
   date: Dayjs;
   aliveCount: number;
   avgHeightCm: number;
+  workStartTime: Dayjs;
+  workEndTime: Dayjs;
 }
 
 export default function SurveyBoard() {
@@ -126,6 +131,8 @@ export default function SurveyBoard() {
       date: dayjs(),
       aliveCount: 0,
       avgHeightCm: 0,
+      workStartTime: dayjs('07:00', 'HH:mm'),
+      workEndTime: dayjs('10:00', 'HH:mm'),
     });
     setOpen(true);
   };
@@ -138,6 +145,8 @@ export default function SurveyBoard() {
       date: dayjs(row.date),
       aliveCount: row.aliveCount,
       avgHeightCm: row.avgHeightCm,
+      workStartTime: row.workStartTime ? dayjs(row.workStartTime, 'HH:mm') : undefined,
+      workEndTime: row.workEndTime ? dayjs(row.workEndTime, 'HH:mm') : undefined,
     });
     setOpen(true);
   };
@@ -152,6 +161,8 @@ export default function SurveyBoard() {
         date: values.date.format('YYYY-MM-DD'),
         aliveCount: values.aliveCount,
         avgHeightCm: values.avgHeightCm,
+        workStartTime: values.workStartTime ? values.workStartTime.format('HH:mm') : '',
+        workEndTime: values.workEndTime ? values.workEndTime.format('HH:mm') : '',
       };
       if (editing === null) {
         const row = await createSurvey(payload);
@@ -270,6 +281,38 @@ export default function SurveyBoard() {
       width: 110,
       render: (_value, record) =>
         record.gradeManual ? <Tag color="purple">人工复核</Tag> : <Tag>自动判定</Tag>,
+    },
+    {
+      title: '露滩核对',
+      key: 'tideStatus',
+      width: 110,
+      render: (_value, record) => (
+        <Space direction="vertical" size={0}>
+          <Tag color={TIDE_CHECK_STATUS_COLOR[record.tideStatus as TideCheckStatus]}>
+            {TIDE_CHECK_STATUS_LABEL[record.tideStatus as TideCheckStatus]}
+          </Tag>
+          {record.tideWindowVersionId > 0 ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              依据 v{record.tideWindowVersionId}
+            </Typography.Text>
+          ) : null}
+        </Space>
+      ),
+    },
+    {
+      title: '作业时刻',
+      key: 'workTime',
+      width: 140,
+      render: (_value, record) =>
+        record.workStartTime ? (
+          <Tag icon={<ClockCircleOutlined />}>
+            {record.workStartTime}–{record.workEndTime}
+          </Tag>
+        ) : (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            无（历史）
+          </Typography.Text>
+        ),
     },
     {
       title: '操作',
@@ -490,8 +533,22 @@ export default function SurveyBoard() {
               <InputNumber min={0} max={2000} step={1} style={{ width: '100%' }} />
             </Form.Item>
           </Space>
+          <Space size={12} style={{ display: 'flex' }}>
+            <Form.Item
+              name="workStartTime"
+              label="作业开始时刻"
+              style={{ flex: 1 }}
+              tooltip="测次带作业起止时刻，落进当天露滩时段才算数"
+            >
+              <TimePicker format="HH:mm" style={{ width: '100%' }} minuteStep={15} />
+            </Form.Item>
+            <Form.Item name="workEndTime" label="作业结束时刻" style={{ flex: 1 }}>
+              <TimePicker format="HH:mm" style={{ width: '100%' }} minuteStep={15} />
+            </Form.Item>
+          </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+            测次保存后按地块关联潮位站 + 日期对账，落进露滩时段才算数，停在时段外先挂起等复核，挂起期间不生成补植计划。
           </Typography.Text>
         </Form>
       </Modal>

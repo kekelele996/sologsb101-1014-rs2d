@@ -34,6 +34,8 @@ export interface Plot {
   restoreMode: RestoreMode;
   /** 跟踪状态 */
   state: PlotState;
+  /** 关联的潮位监测站 id（露滩排期按此站时段对账） */
+  tideStationId: string;
   /** 缺株数（株）——补植完成后由此回写 */
   missingCount: number;
   /** 最近一次补植/复壮回写日期 */

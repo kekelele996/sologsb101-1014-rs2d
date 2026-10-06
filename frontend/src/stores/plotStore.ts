@@ -203,6 +203,7 @@ export const usePlotStore = create<PlotStoreState>((set, get) => ({
       substrate: draft.substrate,
       restoreMode: draft.restoreMode,
       state: draft.state,
+      tideStationId: '',
       missingCount: 0,
       lastReplantDate: '',
       createdAt: stamp,

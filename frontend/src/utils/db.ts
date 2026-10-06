@@ -11,6 +11,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant, ReplantState } from '../types/replant';
+import type { TideImport, TideSource, TideStation, TideWindow } from '../types/tide';
 import { rateLevel } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
@@ -19,10 +20,10 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbmangrove';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class MangroveDatabase extends Dexie {
   plots!: Table<Plot, string>;
@@ -30,6 +31,10 @@ class MangroveDatabase extends Dexie {
   plantings!: Table<Planting, string>;
   surveys!: Table<Survey, string>;
   replants!: Table<Replant, string>;
+  tideStations!: Table<TideStation, string>;
+  tideWindows!: Table<TideWindow, string>;
+  tideImports!: Table<TideImport, string>;
+  tideSources!: Table<TideSource, string>;
 
   constructor() {
     super(DB_NAME);
@@ -81,6 +86,88 @@ class MangroveDatabase extends Dexie {
           if (typeof row.gradeManual !== 'boolean') row.gradeManual = false;
         });
       });
+
+    // ---------- v3：潮汐露滩对账 ----------
+    // 新增潮位站 / 露滩时段 / 导入批次 / 对账来源四张表；
+    // 验收测次补作业起止时刻与露滩核对状态，地块关联潮位站。
+    this.version(3)
+      .stores({
+        plots: 'id, name, tideZone, substrate, restoreMode, state, tideStationId, createdAt, updatedAt',
+        seedlings: 'id, plotId, species, source, arrivalDate, quantity',
+        plantings: 'id, plotId, seedlingId, plantDate, spacingM',
+        surveys: 'id, plotId, [plotId+round], date, grade, tideStatus, tideSourceId',
+        replants: 'id, plotId, planDate, state, species',
+        tideStations: 'id, name, code',
+        tideWindows: 'id, stationId, [stationId+date], date, version',
+        tideImports: 'id, status, importedAt',
+        tideSources: 'id, surveyId, plotId, stationId, [surveyId+windowVersionId]',
+      })
+      .upgrade(async (tx) => {
+        // 迁移 4：地块补关联潮位站字段
+        await tx.table('plots').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.tideStationId !== 'string') row.tideStationId = '';
+        });
+        // 迁移 5：历史测次没有作业时刻，按测次日期补一条来源；补不上的只读留着
+        const stations = await tx.table('tideStations').toArray();
+        const windows = await tx.table('tideWindows').toArray();
+        const stationByPlot = new Map<string, string>();
+        await tx.table('plots').each((row: Record<string, unknown>) => {
+          if (typeof row.tideStationId === 'string' && row.tideStationId) {
+            stationByPlot.set(row.id as string, row.tideStationId);
+          }
+        });
+        const sourceRows: TideSource[] = [];
+        const now = nowIso();
+        await tx.table('surveys').toCollection().modify((row: Record<string, unknown>) => {
+          if (typeof row.workStartTime !== 'string') row.workStartTime = '';
+          if (typeof row.workEndTime !== 'string') row.workEndTime = '';
+          if (typeof row.tideCheckedAt !== 'string') row.tideCheckedAt = '';
+          // 已有来源记录的不重复补
+          if (typeof row.tideSourceId === 'string' && row.tideSourceId) return;
+          const stationId = stationByPlot.get(row.plotId as string) ?? '';
+          const win = stationId
+            ? windows.find((w: TideWindow) => w.stationId === stationId && w.date === row.date)
+            : undefined;
+          if (win) {
+            // 按测次日期补上来源，状态正常（历史测次日期能对上露滩时段）
+            const sourceId = `tidesrc-backfill-${row.id as string}`;
+            sourceRows.push({
+              id: sourceId,
+              surveyId: row.id as string,
+              plotId: row.plotId as string,
+              stationId: win.stationId,
+              windowId: win.id,
+              windowVersionId: win.version,
+              date: row.date as string,
+              sourceType: 'backfill',
+              createdAt: now,
+            });
+            row.tideStatus = 'normal';
+            row.tideWindowVersionId = win.version;
+            row.tideSourceId = sourceId;
+            row.tideCheckedAt = now;
+          } else {
+            // 补不上来源：只读留着，不参与露滩核对与补植生成
+            row.tideStatus = 'readonly';
+            row.tideWindowVersionId = 0;
+            row.tideSourceId = '';
+          }
+        });
+        if (sourceRows.length > 0) await tx.table('tideSources').bulkPut(sourceRows);
+        // 站点表空时补一个默认站，便于演示（幂等：仅当无站点时）
+        if (stations.length === 0) {
+          const defaultStation: TideStation = {
+            id: 'tide-station-default',
+            name: '默认潮位站',
+            code: 'DEFAULT',
+            location: '升级补录',
+            createdAt: now,
+            updatedAt: now,
+            revision: ROW_REVISION,
+          };
+          await tx.table('tideStations').put(defaultStation);
+        }
+      });
   }
 }
 
@@ -126,15 +213,20 @@ export async function patchPlot(id: string, patch: Partial<Plot>): Promise<void>
   await db.plots.update(id, { ...patch, updatedAt: nowIso() });
 }
 
-/** 删除地块并级联清理其下苗木批次、栽植、验收与补植计划 */
+/** 删除地块并级联清理其下苗木批次、栽植、验收、补植计划与对账来源 */
 export async function removePlot(id: string): Promise<void> {
-  await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
-    await db.seedlings.where('plotId').equals(id).delete();
-    await db.plantings.where('plotId').equals(id).delete();
-    await db.surveys.where('plotId').equals(id).delete();
-    await db.replants.where('plotId').equals(id).delete();
-    await db.plots.delete(id);
-  });
+  await db.transaction(
+    'rw',
+    [db.plots, db.seedlings, db.plantings, db.surveys, db.replants, db.tideSources],
+    async () => {
+      await db.seedlings.where('plotId').equals(id).delete();
+      await db.plantings.where('plotId').equals(id).delete();
+      await db.surveys.where('plotId').equals(id).delete();
+      await db.replants.where('plotId').equals(id).delete();
+      await db.tideSources.where('plotId').equals(id).delete();
+      await db.plots.delete(id);
+    },
+  );
 }
 
 /* ------------------------------ 苗木批次 ------------------------------ */
@@ -276,6 +368,84 @@ export async function advanceReplantState(replantId: string, next: ReplantState)
   }
 }
 
+/* ------------------------------ 潮汐露滩 ------------------------------ */
+
+export async function listTideStations(): Promise<TideStation[]> {
+  const rows = await db.tideStations.toArray();
+  return rows.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+export async function putTideStation(row: TideStation): Promise<void> {
+  await db.tideStations.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION });
+}
+
+export async function removeTideStation(id: string): Promise<void> {
+  await db.transaction('rw', db.tideStations, db.tideWindows, db.tideSources, async () => {
+    await db.tideWindows.where('stationId').equals(id).delete();
+    await db.tideSources.where('stationId').equals(id).delete();
+    await db.tideStations.delete(id);
+  });
+}
+
+export async function listTideWindows(): Promise<TideWindow[]> {
+  const rows = await db.tideWindows.toArray();
+  return rows.sort((a, b) =>
+    a.stationId === b.stationId
+      ? a.date === b.date
+        ? a.startTime.localeCompare(b.startTime)
+        : a.date.localeCompare(b.date)
+      : a.stationId.localeCompare(b.stationId),
+  );
+}
+
+export async function listTideWindowsByStation(stationId: string): Promise<TideWindow[]> {
+  const rows = await db.tideWindows.where('stationId').equals(stationId).toArray();
+  return rows.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
+}
+
+/**
+ * 保存露滩时段。若同一天时段内容有改动，版本号 +1，
+ * 并触发该站当天测次的失效重算 / 留原值标版本（由调用方在 store 层编排）。
+ */
+export async function putTideWindow(row: TideWindow): Promise<{ saved: TideWindow; changed: boolean }> {
+  const existing = await db.tideWindows.get(row.id);
+  const changed =
+    existing !== undefined && (existing.startTime !== row.startTime || existing.endTime !== row.endTime);
+  const next: TideWindow = {
+    ...row,
+    version: changed ? existing.version + 1 : row.version,
+    updatedAt: nowIso(),
+    revision: ROW_REVISION,
+  };
+  await db.tideWindows.put(next);
+  return { saved: next, changed };
+}
+
+export async function removeTideWindow(id: string): Promise<void> {
+  await db.tideWindows.delete(id);
+}
+
+export async function listTideImports(): Promise<TideImport[]> {
+  const rows = await db.tideImports.toArray();
+  return rows.sort((a, b) => b.importedAt.localeCompare(a.importedAt));
+}
+
+export async function putTideImport(row: TideImport): Promise<void> {
+  await db.tideImports.put({ ...row, updatedAt: nowIso(), revision: ROW_REVISION });
+}
+
+export async function listTideSources(): Promise<TideSource[]> {
+  return db.tideSources.toArray();
+}
+
+export async function putTideSource(row: TideSource): Promise<void> {
+  await db.tideSources.put({ ...row });
+}
+
+export async function removeTideSource(id: string): Promise<void> {
+  await db.tideSources.delete(id);
+}
+
 /* ---------------------------- 整库快照 ---------------------------- */
 
 export interface DatabaseSnapshot {
@@ -287,17 +457,26 @@ export interface DatabaseSnapshot {
   plantings: Planting[];
   surveys: Survey[];
   replants: Replant[];
+  tideStations: TideStation[];
+  tideWindows: TideWindow[];
+  tideImports: TideImport[];
+  tideSources: TideSource[];
 }
 
 /** 导出整库快照 */
 export async function exportSnapshot(): Promise<DatabaseSnapshot> {
-  const [plots, seedlings, plantings, surveys, replants] = await Promise.all([
-    db.plots.toArray(),
-    db.seedlings.toArray(),
-    db.plantings.toArray(),
-    db.surveys.toArray(),
-    db.replants.toArray(),
-  ]);
+  const [plots, seedlings, plantings, surveys, replants, tideStations, tideWindows, tideImports, tideSources] =
+    await Promise.all([
+      db.plots.toArray(),
+      db.seedlings.toArray(),
+      db.plantings.toArray(),
+      db.surveys.toArray(),
+      db.replants.toArray(),
+      db.tideStations.toArray(),
+      db.tideWindows.toArray(),
+      db.tideImports.toArray(),
+      db.tideSources.toArray(),
+    ]);
   return {
     name: DB_NAME,
     schemaVersion: DB_SCHEMA_VERSION,
@@ -307,49 +486,98 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
     plantings,
     surveys,
     replants,
+    tideStations,
+    tideWindows,
+    tideImports,
+    tideSources,
   };
 }
 
 /** 用快照覆盖整库（导入存档） */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
-  await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
-    await Promise.all([
-      db.plots.clear(),
-      db.seedlings.clear(),
-      db.plantings.clear(),
-      db.surveys.clear(),
-      db.replants.clear(),
-    ]);
-    await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
-  });
+  await db.transaction(
+    'rw',
+    [
+      db.plots,
+      db.seedlings,
+      db.plantings,
+      db.surveys,
+      db.replants,
+      db.tideStations,
+      db.tideWindows,
+      db.tideImports,
+      db.tideSources,
+    ],
+    async () => {
+      await Promise.all([
+        db.plots.clear(),
+        db.seedlings.clear(),
+        db.plantings.clear(),
+        db.surveys.clear(),
+        db.replants.clear(),
+        db.tideStations.clear(),
+        db.tideWindows.clear(),
+        db.tideImports.clear(),
+        db.tideSources.clear(),
+      ]);
+      await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.tideStations.bulkPut((snapshot.tideStations ?? []).map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.tideWindows.bulkPut((snapshot.tideWindows ?? []).map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.tideImports.bulkPut((snapshot.tideImports ?? []).map((row) => ({ ...row, revision: ROW_REVISION })));
+      await db.tideSources.bulkPut((snapshot.tideSources ?? []).map((row) => ({ ...row, revision: ROW_REVISION })));
+    },
+  );
 }
 
 /** 清空全部数据并重新灌入演示数据 */
 export async function resetDatabase(): Promise<void> {
-  await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
-    await Promise.all([
-      db.plots.clear(),
-      db.seedlings.clear(),
-      db.plantings.clear(),
-      db.surveys.clear(),
-      db.replants.clear(),
-    ]);
-  });
+  await db.transaction(
+    'rw',
+    [
+      db.plots,
+      db.seedlings,
+      db.plantings,
+      db.surveys,
+      db.replants,
+      db.tideStations,
+      db.tideWindows,
+      db.tideImports,
+      db.tideSources,
+    ],
+    async () => {
+      await Promise.all([
+        db.plots.clear(),
+        db.seedlings.clear(),
+        db.plantings.clear(),
+        db.surveys.clear(),
+        db.replants.clear(),
+        db.tideStations.clear(),
+        db.tideWindows.clear(),
+        db.tideImports.clear(),
+        db.tideSources.clear(),
+      ]);
+    },
+  );
   await seedDatabase();
 }
 
 /** 各表行数统计 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [plots, seedlings, plantings, surveys, replants] = await Promise.all([
-    db.plots.count(),
-    db.seedlings.count(),
-    db.plantings.count(),
-    db.surveys.count(),
-    db.replants.count(),
-  ]);
-  return { plots, seedlings, plantings, surveys, replants };
+  const [plots, seedlings, plantings, surveys, replants, tideStations, tideWindows, tideImports, tideSources] =
+    await Promise.all([
+      db.plots.count(),
+      db.seedlings.count(),
+      db.plantings.count(),
+      db.surveys.count(),
+      db.replants.count(),
+      db.tideStations.count(),
+      db.tideWindows.count(),
+      db.tideImports.count(),
+      db.tideSources.count(),
+    ]);
+  return { plots, seedlings, plantings, surveys, replants, tideStations, tideWindows, tideImports, tideSources };
 }

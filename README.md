@@ -1,7 +1,8 @@
 # 红树林修复地块成活率跟踪台（sologsb101-1014）
 
 面向红树林修复项目的现场管理人员：按地块登记苗木批次与栽植记录，分次验收成活株数与株高，
-按测次生成成活率趋势，低于阈值时生成补植计划并回写地块缺株数。
+按测次生成成活率趋势，低于阈值时生成补植计划并回写地块缺株数。测次带作业起止时刻，
+落进当天露滩时段才算数；停在时段外的先挂起等复核，挂起期间不生成补植计划。
 
 **纯前端单页应用**：无后端、无数据库服务、无 API 调用，数据全部保存在浏览器本地（IndexedDB），
 容器完全无状态、不挂载任何数据卷。
@@ -87,7 +88,8 @@ sologsb101-1014/
 | `/plots` | `pages/PlotList.tsx` | 修复地块台账：新建/编辑/级联删除、按潮位带与底质筛选、回显栽植总株数与最新成活率 |
 | `/plots/:id/seedlings` | `pages/SeedlingBoard.tsx` | 苗木批次与来源登记、批次数量累计校验（含密度提示） |
 | `/plots/:id/plantings` | `pages/PlantingEntry.tsx` | 栽植记录：录株距与株数、按面积与株距校验密度合理性 |
-| `/surveys` | `pages/SurveyBoard.tsx` | 成活率与株高验收台：按测次录入、自动算成活率、低于阈值告警、批量调整成活率等级 |
+| `/surveys` | `pages/SurveyBoard.tsx` | 成活率与株高验收台：按测次录入、自动算成活率、低于阈值告警、批量调整成活率等级、作业时刻露滩核对 |
+| `/tide` | `pages/TideSchedule.tsx` | 露滩时段与排期对账：潮位站时段维护、潮位表导入失败只重试潮位侧、测次按地块 + 日期对账、顺排 / 复核挂起测次 |
 | `/replants` | `pages/ReplantPlan.tsx` | 补植计划：状态流转（待补植→已补植→已复核）、行内草稿、JSON 导入导出、结构版本查看 |
 
 `/` 重定向到 `/plots`，未匹配路径统一回落到 `/plots`。
@@ -100,20 +102,28 @@ sologsb101-1014/
 
 * **持久化方案**：IndexedDB，通过 Dexie 封装（`src/utils/db.ts`）。
 * **数据库名**：`gbmangrove`。
-* **数据结构版本**：`DB_SCHEMA_VERSION = 2`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行 `.upgrade()` 迁移：
-  * 为 `plots` 增加 `updatedAt`、`surveys` 增加 `[plotId+round]` 复合索引、`plantings` 增加 `spacingM` 索引等；
-  * 回填 `revision` / `createdAt` / `updatedAt`；
-  * 为 `plots` 补齐 `missingCount`、`lastReplantDate` 回写字段；
-  * 为 `surveys` 补齐 `grade`、`gradeManual` 字段（按 `survivalRate` 自动判定等级）。
+* **数据结构版本**：`DB_SCHEMA_VERSION = 3`，`version(1)` 建立全部表，`version(2)` 补齐索引并执行迁移，`version(3)` 引入潮汐露滩对账：
+  * v2：为 `plots` 增加 `updatedAt`、`surveys` 增加 `[plotId+round]` 复合索引、`plantings` 增加 `spacingM` 索引等；
+    回填 `revision` / `createdAt` / `updatedAt`；为 `plots` 补齐 `missingCount`、`lastReplantDate` 回写字段；
+    为 `surveys` 补齐 `grade`、`gradeManual` 字段（按 `survivalRate` 自动判定等级）。
+  * v3：新增 `tideStations` / `tideWindows` / `tideImports` / `tideSources` 四张表；
+    为 `plots` 补 `tideStationId`（关联潮位站），为 `surveys` 补 `workStartTime` / `workEndTime` / `tideStatus` /
+    `tideWindowVersionId` / `tideSourceId` / `tideCheckedAt`。
+    升级时对历史测次（无作业时刻）按测次日期补一条来源：能对上露滩时段的补来源、状态正常；
+    补不上的只读留着（`tideStatus = 'readonly'`）。
 * **表结构**：
 
   | 表 | 主键 | 主要索引 |
   | --- | --- | --- |
-  | `plots` | id | name, tideZone, substrate, restoreMode, state, createdAt, updatedAt |
+  | `plots` | id | name, tideZone, substrate, restoreMode, state, tideStationId, createdAt, updatedAt |
   | `seedlings` | id | plotId, species, source, arrivalDate, quantity |
   | `plantings` | id | plotId, seedlingId, plantDate, spacingM |
-  | `surveys` | id | plotId, [plotId+round], date, grade |
+  | `surveys` | id | plotId, [plotId+round], date, grade, tideStatus, tideSourceId |
   | `replants` | id | plotId, planDate, state, species |
+  | `tideStations` | id | name, code |
+  | `tideWindows` | id | stationId, [stationId+date], date, version |
+  | `tideImports` | id | status, importedAt |
+  | `tideSources` | id | surveyId, plotId, stationId, [surveyId+windowVersionId] |
 
 * **首屏演示数据**：`initDatabase()` 在打开数据库后检测 `plots` 表是否为空，为空则调用 `utils/seed.ts` 播种，
   幂等且只执行一次。播种链路为 **地块 → 苗木批次 → 栽植 → 验收 → 补植** 三层互相引用：
@@ -152,3 +162,7 @@ npm run preview      # 预览 dist 产物
 * **密度合理性**：平均单株占地面积需落在 0.6–12 ㎡/株；过密/过疏都会在栽植记录页给出提示。
 * **补植回写**：补植状态推进到「已补植」时，自动扣减地块缺株数、写入最近补植日期，
   并按「原成活株数 + 本次补植株数」重算最新一次验收的成活率。
+* **露滩对账**（`src/utils/tide.ts`）：测次带作业起止时刻，按地块关联潮位站 + 日期对账，
+  落进当天露滩时段才算数；一段排不下的顺到下一段；停在时段外的先挂起等复核，挂起期间不生成补植计划。
+  潮位站改动当天时段后，没定级的测次失效重算，已定级的留原值并标依据哪一版。
+  潮位表导入失败只重试潮位侧，外业排期照旧。历史测次无作业时刻，升级时按测次日期补一条来源，补不上的只读留着。

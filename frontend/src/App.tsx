@@ -11,11 +11,13 @@ import {
   DashboardOutlined,
   ExperimentOutlined,
   ToolOutlined,
+  CloudOutlined,
 } from '@ant-design/icons';
 import { ROUTES } from './router';
 import { usePlotStore } from './stores/plotStore';
 import { useReplantStore } from './stores/replantStore';
 import { useSurveyStore } from './stores/surveyStore';
+import { useTideStore } from './stores/tideStore';
 import { percentText } from './utils/rate';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -24,6 +26,7 @@ const { Header, Sider, Content, Footer } = Layout;
 function selectedKey(pathname: string): string {
   if (pathname.startsWith('/plots/')) return ROUTES.plots;
   if (pathname.startsWith('/surveys')) return ROUTES.surveys;
+  if (pathname.startsWith('/tide')) return ROUTES.tide;
   if (pathname.startsWith('/replants')) return ROUTES.replants;
   return ROUTES.plots;
 }
@@ -39,12 +42,14 @@ export default function App() {
   const loadAll = usePlotStore((state) => state.loadAll);
   const initSurvey = useSurveyStore((state) => state.init);
   const initReplant = useReplantStore((state) => state.init);
+  const initTide = useTideStore((state) => state.init);
 
   useEffect(() => {
     void loadAll();
     void initSurvey();
     void initReplant();
-  }, [loadAll, initSurvey, initReplant]);
+    void initTide();
+  }, [loadAll, initSurvey, initReplant, initTide]);
 
   const currentPlot = plots.find((plot) => plot.id === currentPlotId) ?? null;
   const currentStat = currentPlot === null ? null : statOf(currentPlot.id);
@@ -69,6 +74,7 @@ export default function App() {
           items={[
             { key: ROUTES.plots, icon: <AppstoreOutlined />, label: '修复地块台账' },
             { key: ROUTES.surveys, icon: <ExperimentOutlined />, label: '成活率验收台' },
+            { key: ROUTES.tide, icon: <CloudOutlined />, label: '露滩排期对账' },
             { key: ROUTES.replants, icon: <ToolOutlined />, label: '补植计划' },
           ]}
         />

@@ -9,8 +9,10 @@ import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '..
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
 import { calcSurvivalRate, rateLevel } from '../utils/rate';
+import { reconcileSurvey as reconcileSurveyPure } from '../utils/tide';
 import type { SurveyDraft } from '../types/survey';
 import { usePlotStore } from './plotStore';
+import { plotHasSuspendedSurvey } from './tideStore';
 
 /** 验收筛选条件（地块 + 等级 + 关键字 + 日期区间） */
 export interface SurveyFilters {
@@ -55,6 +57,39 @@ function totalPlantedOf(plotId: string): number {
     .reduce((acc, row) => acc + row.count, 0);
 }
 
+/** 测次保存后按地块关联潮位站 + 日期对账，落进当天露滩时段才算数 */
+async function reconcileSurveyRow(row: Survey): Promise<Survey> {
+  const plot = await db.plots.get(row.plotId);
+  const stationId = plot?.tideStationId ?? '';
+  const windows = await db.tideWindows.toArray();
+  const result = reconcileSurveyPure(row, stationId, windows);
+  const stamp = nowIso();
+  let sourceId = row.tideSourceId;
+  if (result.status === 'normal' && result.window) {
+    sourceId = sourceId || uuid('tidesrc');
+    await db.tideSources.put({
+      id: sourceId,
+      surveyId: row.id,
+      plotId: row.plotId,
+      stationId: result.window.stationId,
+      windowId: result.window.id,
+      windowVersionId: result.windowVersionId,
+      date: row.date,
+      sourceType: 'manual',
+      createdAt: stamp,
+    });
+  }
+  const next: Survey = {
+    ...row,
+    tideStatus: result.status,
+    tideWindowVersionId: result.windowVersionId,
+    tideSourceId: sourceId,
+    tideCheckedAt: stamp,
+  };
+  await putSurvey(next);
+  return next;
+}
+
 export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   filters: { ...EMPTY_FILTERS },
   selectedIds: [],
@@ -97,13 +132,21 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
+      workStartTime: draft.workStartTime,
+      workEndTime: draft.workEndTime,
+      tideStatus: 'readonly',
+      tideWindowVersionId: 0,
+      tideSourceId: '',
+      tideCheckedAt: '',
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: 3,
     };
+    // 落库后按地块关联潮位站 + 日期对账，落进露滩时段才算数
     await putSurvey(row);
+    const reconciled = await reconcileSurveyRow(row);
     set({ revision: get().revision + 1 });
-    return row;
+    return reconciled;
   },
 
   async updateSurvey(surveyId, draft) {
@@ -119,6 +162,18 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       aliveCount: draft.aliveCount,
       avgHeightCm: draft.avgHeightCm,
       survivalRate,
+      workStartTime: draft.workStartTime,
+      workEndTime: draft.workEndTime,
+      // 编辑后重新对账（已定级的留原值，仅重算露滩状态）
+      tideCheckedAt: '',
+    });
+    await reconcileSurveyRow({
+      ...existing,
+      plotId: draft.plotId,
+      round: draft.round,
+      date: draft.date,
+      workStartTime: draft.workStartTime,
+      workEndTime: draft.workEndTime,
     });
     set({ revision: get().revision + 1 });
   },
@@ -141,6 +196,10 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
     const summary = get().summaryOf(plotId);
     const plot = usePlotStore.getState().plots.find((row) => row.id === plotId);
     if (!plot) return '地块不存在，无法生成补植计划';
+    // 挂起期间不生成补植计划（只读测次不拦截）
+    if (await plotHasSuspendedSurvey(plotId)) {
+      return '该地块有测次停在露滩时段外（挂起等复核），挂起期间不生成补植计划';
+    }
     const missing = summary.suggestReplant;
     if (missing <= 0) return '该地块当前无缺株，无需生成补植计划';
     const species = usePlotStore.getState().seedlings.find((row) => row.plotId === plotId)?.species ?? '秋茄';
